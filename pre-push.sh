@@ -5,7 +5,7 @@ remote="$1"
 url="$2"
 
 # Check if pushing to personal GitHub
-if [[ $url == *"github.com"* && $url != *"github.com/zeptonow"* ]]; then
+if [[ $url == *"github.com"* && $url != *"github.com/zeptonow"* && $url != *"github.com:zeptonow"* ]]; then
     echo -e "Error: Pushing to personal GitHub repositories is not allowed\n"
     echo -e "Please push only to zeptonow repositories. This action will be logged.\n"
     
