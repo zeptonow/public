@@ -14,9 +14,9 @@ git config --global core.hooksPath ~/.git/hooks
 
 # Verify installation
 if [ -x ~/.git/hooks/pre-push ]; then
-    echo "✅ Pre-push hook installed successfully"
-    echo "✅ Global hooks path set to: $(git config --global --get core.hooksPath)"
+    echo "✅ Setup successful"
+    echo "✅ Global path set to: $(git config --global --get core.hooksPath)"
 else
-    echo "❌ Hook installation failed"
+    echo "❌ Installation failed"
     exit 1
 fi
