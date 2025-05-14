@@ -29,6 +29,8 @@ log_and_notify() {
 
     # Log to syslog
     logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
+    echo "[DEBUG] Payload being sent to Lambda:"
+    echo "$payload" > "$HOME/.git/hooks/last_payload.json"
 
     # Send to remote
     (curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$REMOTE_LOGGING_URL" &) 2>/dev/null
