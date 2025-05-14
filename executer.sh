@@ -3,8 +3,6 @@
 # Set error handling
 set -e
 
-echo "Setting up git security hooks for zeptonow..."
-
 # Create global git hooks directory
 mkdir -p ~/.git/hooks
 
@@ -38,7 +36,6 @@ else
     exit 1
 fi
 
-echo "REMINDER: Code push security measures are now in place."
 echo "For assistance, contact security@zeptonow.com or Slack channel #security"
 
 exit 0
