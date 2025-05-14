@@ -13,19 +13,27 @@ log_and_notify() {
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     local hostname=$(hostname)
     local username=$(whoami)
-    
-    # Create simplified JSON payload with only required details
-    local payload="{\"timestamp\":\"$timestamp\",\"hostname\":\"$hostname\",\"username\":\"$username\",\"repository\":\"$url\",\"git_remote\":\"$remote\"}"
-    
-    # Log locally - avoid sudo, use $HOME which is always writable by the user
+
+    # Construct payload safely with jq
+    local payload=$(jq -n \
+        --arg timestamp "$timestamp" \
+        --arg hostname "$hostname" \
+        --arg username "$username" \
+        --arg repository "$url" \
+        --arg git_remote "$remote" \
+        '{timestamp: $timestamp, hostname: $hostname, username: $username, repository: $repository, git_remote: $git_remote}'
+    )
+
+    # Log locally
     echo "$timestamp - BLOCKED: User $username on $hostname attempted to push to non-zeptonow repository: $url" >> "$LOG_FILE"
-    
-    # System log (syslog) - native to macOS
+
+    # Log to syslog
     logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
-    
-    # Send to remote logging service - runs in background to not delay the user
+
+    # Send to remote
     (curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$REMOTE_LOGGING_URL" &) 2>/dev/null
 }
+
 
 # Check if pushing to any non-zeptonow repository
 # This specifically checks for "zeptonow" in the URL (not just "zepto")
