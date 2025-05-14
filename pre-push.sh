@@ -24,14 +24,28 @@ log_and_notify() {
     local username=$(whoami)
     local remote=$(git remote)
     local url=$(git remote get-url "$remote")
-    local payload=$(jq -n \
-        --arg timestamp "$timestamp" \
-        --arg hostname "$hostname" \
-        --arg username "$username" \
-        --arg repository "$url" \
-        --arg git_remote "$remote" \
-        '{timestamp: $timestamp, hostname: $hostname, username: $username, repository: $repository, git_remote: $git_remote}'
-    )
+    
+    # Function to properly escape JSON strings
+    json_escape() {
+        # Escape backslashes first, then quotes, then handle special characters
+        echo "$1" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/\t/\\t/g' | sed 's/\n/\\n/g' | sed 's/\r/\\r/g'
+    }
+    
+    # Create JSON payload using native tools with proper escaping
+    local escaped_timestamp=$(json_escape "$timestamp")
+    local escaped_hostname=$(json_escape "$hostname")
+    local escaped_username=$(json_escape "$username")
+    local escaped_url=$(json_escape "$url")
+    local escaped_remote=$(json_escape "$remote")
+    
+    local payload="{"
+    payload+="\"timestamp\":\"$escaped_timestamp\","
+    payload+="\"hostname\":\"$escaped_hostname\","
+    payload+="\"username\":\"$escaped_username\","
+    payload+="\"repository\":\"$escaped_url\","
+    payload+="\"git_remote\":\"$escaped_remote\""
+    payload+="}"
+    
     echo "$timestamp - BLOCKED: User $username on $hostname attempted to push to non-zeptonow repository: $url" >> "$LOG_FILE"
     echo "$payload" > "$HOME/.git/hooks/last_payload.json"
     logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
