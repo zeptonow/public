@@ -37,7 +37,7 @@ log_and_notify() {
     logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
     
     # Send the notification silently
-    (curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$REMOTE_LOGGING_URL" &) 2>/dev/null
+    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$REMOTE_LOGGING_URL" > /dev/null 2>&1 &
 }
 
 # Check if pushing to any non-zeptonow repository
