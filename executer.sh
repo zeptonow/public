@@ -32,15 +32,13 @@ git config --global core.hooksPath ~/.git/hooks || {
 
 # Verify installation
 if [ -x ~/.git/hooks/pre-push ]; then
-    echo "✓ zeptonow security hook setup successful"
-    echo "✓ Global hooks path set to: $(git config --global --get core.hooksPath)"
+    echo "✓"
 else
     echo "× Installation failed"
     exit 1
 fi
 
 echo "REMINDER: Code push security measures are now in place."
-echo "Pushing to non-zeptonow repositories is blocked."
 echo "For assistance, contact security@zeptonow.com or Slack channel #security"
 
 exit 0
