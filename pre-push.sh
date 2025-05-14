@@ -1,20 +1,21 @@
 #!/bin/bash
 
 # Get the current remote and URL
-remote="$1"
-url="$2"
+remote=$(git remote)
+url=$(git remote get-url "$remote")
+
 
 # Log file and remote logging URL
 LOG_FILE="$HOME/.git/hooks/push_attempts.log"
 REMOTE_LOGGING_URL="https://viy7077zbe.execute-api.ap-south-1.amazonaws.com/prod/log"
 
-# Function to log and notify
 log_and_notify() {
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     local hostname=$(hostname)
     local username=$(whoami)
+    local remote=$(git remote)
+    local url=$(git remote get-url "$remote")
 
-    # Construct payload safely with jq
     local payload=$(jq -n \
         --arg timestamp "$timestamp" \
         --arg hostname "$hostname" \
@@ -24,17 +25,14 @@ log_and_notify() {
         '{timestamp: $timestamp, hostname: $hostname, username: $username, repository: $repository, git_remote: $git_remote}'
     )
 
-    # Log locally
     echo "$timestamp - BLOCKED: User $username on $hostname attempted to push to non-zeptonow repository: $url" >> "$LOG_FILE"
-
-    # Log to syslog
-    logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
-    echo "[DEBUG] Payload being sent to Lambda:"
     echo "$payload" > "$HOME/.git/hooks/last_payload.json"
 
-    # Send to remote
+    logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
+
     (curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$REMOTE_LOGGING_URL" &) 2>/dev/null
 }
+
 
 
 # Check if pushing to any non-zeptonow repository
