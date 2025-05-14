@@ -8,11 +8,14 @@ url=$(git remote get-url "$remote")
 LOG_FILE="$HOME/.git/hooks/push_attempts.log"
 REMOTE_LOGGING_URL="https://viy7077zbe.execute-api.ap-south-1.amazonaws.com/prod/log"
 
-# Define colors - these work natively on macOS Terminal
-RED='\033[0;31m'
-BOLD_RED='\033[1;31m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
+# Define colors using simpler ANSI color codes that are more widely compatible
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[34m'
+PURPLE='\033[35m'
+CYAN='\033[36m'
+WHITE='\033[37m'
 NC='\033[0m' # No Color
 
 log_and_notify() {
@@ -41,8 +44,11 @@ log_and_notify() {
 # This specifically checks for "zeptonow" in the URL (not just "zepto")
 if [[ $url != *"zeptonow"* ]]; then
     echo ""
+    echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                  SECURITY ALERT                            ║${NC}"
+    echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${BOLD_RED}ERROR:${NC} ${RED}Pushing to non-zeptonow repositories is not allowed${NC}"
+    echo -e "${RED}ERROR: Pushing to non-zeptonow repositories is not allowed${NC}"
     echo -e "${YELLOW}This action has been logged and reported to the security team.${NC}"
     echo -e "For assistance, please contact ${CYAN}security@zeptonow.com${NC} or Slack channel ${CYAN}#security${NC}"
     echo ""
