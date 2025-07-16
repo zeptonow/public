@@ -1,130 +1,222 @@
 #!/bin/bash
+#
+# Git Pre-Push Hook
+#
+# This script performs two primary security checks before allowing a push:
+# 1. Repository Validation: Ensures pushes are only made to approved 'zeptonow' repositories
+#    on GitHub or GitLab. It blocks pushes to any other remote and displays an alert.
+# 2. Secret Detection: Scans the commits being pushed for secrets using 'gitleaks'.
+#    If secrets are found, the push is blocked, a report is displayed, and the event is logged.
+#
+# --- Failsafe Design ---
+# This script is designed to "fail open". If the script itself encounters an
+# unexpected error (e.g., a command fails, a dependency is missing), it will
+# immediately and silently exit with a success code (0), allowing the push
+# to proceed. This ensures that a broken hook does not block developer workflow.
+# Deliberate security blocks (invalid repo, secrets found) will still exit
+# with a failure code (1) to block the push as intended.
 
-# Function to safely get the primary remote URL
-get_primary_remote_url() {
-    # First try origin as it's the most common default
-    if git remote get-url origin >/dev/null 2>&1; then
-        echo $(git remote get-url origin)
-        return 0
-    fi
-    
-    # If origin doesn't exist, get the first remote
-    local first_remote=$(git remote | head -1)
-    if [ -n "$first_remote" ]; then
-        echo $(git remote get-url "$first_remote")
-        return 0
-    fi
-    
-    # No remotes found
-    echo "No remote configured"
-    return 1
-}
+# The main logic is wrapped in a function.
+main() {
+    # Exit immediately if a command exits with a non-zero status.
+    set -e
 
-# Get the primary remote URL
-url=$(get_primary_remote_url)
-if [ $? -ne 0 ]; then
-    echo "ERROR: No git remote found. Cannot verify repository."
-    exit 1
-fi
+    # --- Configuration ---
+    readonly REMOTE_NAME="$1"
+    readonly REMOTE_URL="$2"
+    readonly LOG_FILE="$HOME/.git/hooks/push_attempts.log"
+    readonly REMOTE_LOGGING_URL="https://viy7077zbe.execute-api.ap-south-1.amazonaws.com/prod/log"
+    # New endpoint for logging blocked secrets
+    readonly SECRET_LOGGING_URL="https://security.zepto.co.in/Secret/logblocked"
+    readonly RED='\033[31m'
+    readonly GREEN='\033[32m'
+    readonly YELLOW='\033[33m'
+    readonly BLUE='\033[34m'
+    readonly PURPLE='\033[35m'
+    readonly CYAN='\033[36m'
+    readonly WHITE='\033[37m'
+    readonly NC='\033[0m' # No Color
 
-# Get primary remote name
-primary_remote=$(git remote | head -1)
+    # --- Initial Checks ---
+    if [ -z "$REMOTE_URL" ]; then exit 0; fi
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then exit 0; fi
 
-# Log file and remote logging URL
-LOG_FILE="$HOME/.git/hooks/push_attempts.log"
-REMOTE_LOGGING_URL="https://viy7077zbe.execute-api.ap-south-1.amazonaws.com/prod/log"
-
-# Define colors using simpler ANSI color codes that are more widely compatible
-RED='\033[31m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-BLUE='\033[34m'
-PURPLE='\033[35m'
-CYAN='\033[36m'
-WHITE='\033[37m'
-NC='\033[0m' # No Color
-
-log_and_notify() {
-    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    local hostname=$(hostname 2>/dev/null || echo "unknown")
-    local username=$(whoami 2>/dev/null || echo "unknown")
-    
-    # Function to properly escape JSON strings
-    json_escape() {
-        # Escape backslashes first, then quotes, then handle special characters
-        echo "$1" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed 's/\t/\\t/g' | sed 's/\n/\\n/g' | sed 's/\r/\\r/g'
+    # --- Helper Functions ---
+    is_valid_zeptonow_repo() {
+        local url="$1"
+        url="${url%.git}"
+        if [[ "$url" == git@* ]]; then
+            local domain_and_path="${url#git@}"
+            local domain="${domain_and_path%%:*}"
+            local path="${domain_and_path#*:}"
+            url="https://$domain/$path"
+        fi
+        [[ "$url" == *"github.com/zeptonow/"* ]] || [[ "$url" == *"gitlab.com/zeptonow/"* ]]
     }
-    
-    # Create JSON payload using native tools with proper escaping
-    local escaped_timestamp=$(json_escape "$timestamp")
-    local escaped_hostname=$(json_escape "$hostname")
-    local escaped_username=$(json_escape "$username")
-    local escaped_url=$(json_escape "$url")
-    local escaped_remote=$(json_escape "$primary_remote")
-    
-    local payload="{"
-    payload+="\"timestamp\":\"$escaped_timestamp\","
-    payload+="\"hostname\":\"$escaped_hostname\","
-    payload+="\"username\":\"$escaped_username\","
-    payload+="\"repository\":\"$escaped_url\","
-    payload+="\"git_remote\":\"$escaped_remote\""
-    payload+="}"
-    
-    # Make sure log directory exists
-    mkdir -p "$(dirname "$LOG_FILE")"
-    
-    echo "$timestamp - BLOCKED: User $username on $hostname attempted to push to non-zeptonow repository: $url" >> "$LOG_FILE"
-    echo "$payload" > "$HOME/.git/hooks/last_payload.json"
-    
-    # Use logger only if it exists
-    if command -v logger >/dev/null 2>&1; then
-        logger -p auth.warning "Git Push Security Alert: User $username on $hostname tried to push to non-zeptonow repository: $url"
-    fi
-    
-    # Send the notification silently
-    curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$REMOTE_LOGGING_URL" > /dev/null 2>&1 &
-}
 
-# Check all remotes for compliance
-check_all_remotes() {
-    local has_valid_remote=false
-    
-    for remote in $(git remote); do
-        local remote_url=""
-        if remote_url=$(git remote get-url "$remote" 2>/dev/null); then
-            if [[ "$remote_url" == *"zeptonow"* ]]; then
-                has_valid_remote=true
+    json_escape() {
+        echo "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\n/\\n/g' -e 's/\r/\\r/g'
+    }
+
+    log_and_notify() {
+        local remote_name="$1"
+        local remote_url="$2"
+        local timestamp; timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+        local hostname; hostname=$(hostname 2>/dev/null || echo "unknown_host")
+        local username; username=$(whoami 2>/dev/null || echo "unknown_user")
+        local payload; payload=$(cat <<EOF
+{
+  "timestamp": "$(json_escape "$timestamp")",
+  "hostname": "$(json_escape "$hostname")",
+  "username": "$(json_escape "$username")",
+  "repository": "$(json_escape "$remote_url")",
+  "git_remote": "$(json_escape "$remote_name")"
+}
+EOF
+)
+        mkdir -p "$(dirname "$LOG_FILE")"
+        echo "$timestamp - BLOCKED: User '$username' on '$hostname' attempted to push to a non-zeptonow repository: $remote_url" >> "$LOG_FILE"
+        if command -v logger >/dev/null 2>&1; then
+            logger -p auth.warning "Git Push Blocked: User '$username' attempted to push to non-zeptonow repo: $remote_url"
+        fi
+        curl -s -X POST \
+          -H "Content-Type: application/json" \
+          -d "$payload" "$REMOTE_LOGGING_URL" \
+          --connect-timeout 5 --max-time 10 > /dev/null 2>&1 &
+    }
+
+    # New function to log blocked secret events
+    log_blocked_secrets() {
+        local report_file="$1"
+        local remote_url="$2"
+
+        # Gather required information
+        local user; user=$(whoami 2>/dev/null || echo "unknown_user")
+        
+        # Use jq to create a JSON array of the detected secrets
+        local secrets_array; secrets_array=$(jq 'group_by(.Commit + .File + .RuleID) | map({type: (.[0].RuleID // "N/A"),  commit: (.[0].Commit // "N/A")})' "$report_file")
+
+        # If jq fails or produces no output, exit gracefully
+        if [ -z "$secrets_array" ] || [ "$secrets_array" == "[]" ]; then
+            return
+        fi
+        
+        # Construct the final JSON payload
+        local final_payload; final_payload=$(cat <<EOF
+{
+  "user": "$(json_escape "$user")",
+  "repository": "$(json_escape "$remote_url")",
+  "blocked_secrets": $secrets_array
+}
+EOF
+)
+
+        # Send the log to the security endpoint in the background
+        curl -s -X POST \
+          -H "Content-Type: application/json" \
+          -d "$final_payload" "$SECRET_LOGGING_URL" \
+          --connect-timeout 5 --max-time 10 > /dev/null 2>&1 &
+    }
+
+
+    # --- Check 1: Repository Validation ---
+    if ! is_valid_zeptonow_repo "$REMOTE_URL"; then
+        echo "" >&2
+        echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}" >&2
+        echo -e "${RED}║                     SECURITY ALERT                         ║${NC}" >&2
+        echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}" >&2
+        echo -e "\n${RED}ERROR: Pushing to non-zeptonow repositories is not allowed${NC}" >&2
+        echo -e "${YELLOW}This action has been logged and reported to the security team.${NC}" >&2
+        echo -e "For assistance, please contact ${CYAN}security@zeptonow.com${NC} or Slack channel ${CYAN}#security${NC}\n" >&2
+        log_and_notify "$REMOTE_NAME" "$REMOTE_URL"
+        exit 1
+    fi
+
+    # --- Check 2: Secret Scanning with gitleaks ---
+    check_for_secrets() {
+        if ! command -v gitleaks >/dev/null 2>&1; then return 0; fi
+        
+        # Check for jq, the only dependency for parsing the report.
+        if ! command -v jq >/dev/null 2>&1; then
+            echo -e "${YELLOW}Warning: 'jq' is not installed. It is required to parse the gitleaks report. Please connect with Security team if it fails.${NC}" >&2
+            # Check if Homebrew is installed before trying to use it.
+            if command -v brew >/dev/null 2>&1; then
+                echo -e "${CYAN}Attempting to install jq using Homebrew...${NC}" >&2
+                if brew install jq; then
+                    echo -e "${GREEN}jq installed successfully.${NC}" >&2
+                else
+                    echo -e "${RED}ERROR: Failed to install jq automatically.${NC}" >&2
+                    echo -e "${YELLOW}Please install jq manually ('brew install jq') and try again.${NC}" >&2
+                    return 1 # Return failure to block the push
+                fi
+            else
+                echo -e "${RED}ERROR: Homebrew is not installed.${NC}" >&2
+                echo -e "${YELLOW}Please install jq manually and try again.${NC}" >&2
+                return 1 # Return failure to block the push
             fi
         fi
-    done
-    
-    if [ "$has_valid_remote" = false ]; then
-        return 1
+
+        local temp_report; temp_report=$(mktemp)
+        trap 'rm -f "$temp_report"' EXIT
+        local secrets_found_in_push=false
+        
+        while read -r local_ref local_sha remote_ref remote_sha; do
+            if [[ "$local_sha" =~ ^0+$ ]]; then continue; fi
+            local log_opts
+            if [[ "$remote_sha" =~ ^0+$ ]]; then
+                log_opts="$local_sha"
+            else
+                log_opts="$remote_sha..$local_sha"
+            fi
+            if ! gitleaks detect --source="." --log-opts="$log_opts" --report-format="json" --report-path="$temp_report" --redact=60 >/dev/null 2>&1; then
+                if [ -s "$temp_report" ]; then
+                    secrets_found_in_push=true
+                    break
+                fi
+            fi
+        done
+        
+        if [ "$secrets_found_in_push" = true ]; then
+            # ADDED: Log the event to the new security endpoint
+            log_blocked_secrets "$temp_report" "$REMOTE_URL"
+            # Display the report to the user
+            display_secrets_report "$temp_report"
+            return 1 # Return failure
+        fi
+        
+        return 0
+    }
+
+    display_secrets_report() {
+        local report_file="$1"
+        echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}" >&2
+        echo -e "${RED}║${YELLOW}               HARDCODED SECRETS DETECTED                      ${RED}║${NC}" >&2
+        echo -e "${RED}╚═══════════════════════════════════════════════════════════════╝${NC}" >&2
+        echo -e "\n${YELLOW}⚠️  Your push has been blocked because secrets were found in your commits.${NC}" >&2
+        echo -e "   Please remove them from your commits/history and try again. ${WHITE}For help, contact the ${CYAN}#security${WHITE} team.${NC}\n" >&2
+
+        local current_commit=""
+        jq -r 'group_by(.Commit + .File + .RuleID + .Secret) | map({Commit: .[0].Commit, File: .[0].File, RuleID: .[0].RuleID, Secret: .[0].Secret, Lines: ([.[].StartLine] | sort | unique | map(tostring) | join(", "))}) | sort_by(.Commit) | .[] | "\(.Commit // "N/A")\t\(.File // "N/A")\t\(.RuleID // "N/A")\t\(.Secret // "N/A")\t\(.Lines // "N/A")"' "$report_file" | while IFS=$'\t' read -r commit file rule secret lines; do
+            if [ "$commit" != "$current_commit" ]; then
+                local subject; subject=$(git log -1 --pretty=%s "$commit" 2>/dev/null || echo "Unknown Subject")
+                echo -e "\n${BLUE}📝 Commit: $commit (${subject})${NC}" >&2
+                current_commit="$commit"
+            fi
+            echo -e "  ${CYAN}File:  $file${NC}" >&2
+            echo -e "  ${GREEN}Lines: $lines${NC}" >&2
+            echo -e "  ${PURPLE}Type:  $rule${NC}" >&2
+            echo -e "  ${YELLOW}Secret:$secret${NC}" >&2
+            echo "" >&2
+        done
+        echo "" >&2
+    }
+
+    # --- Execute Checks ---
+    if ! check_for_secrets; then
+        exit 1
     fi
-    
-    return 0
+    exit 0
 }
 
-# Check if any remote is a zeptonow repository
-# This specifically checks for "zeptonow" in the URL (not just "zepto")
-if [[ "$url" != *"zeptonow"* ]] && ! check_all_remotes; then
-    echo ""
-    echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║                  SECURITY ALERT                            ║${NC}"
-    echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "${RED}ERROR: Pushing to non-zeptonow repositories is not allowed${NC}"
-    echo -e "${YELLOW}This action has been logged and reported to the security team.${NC}"
-    echo -e "For assistance, please contact ${CYAN}security@zeptonow.com${NC} or Slack channel ${CYAN}#security${NC}"
-    echo ""
-    
-    # Log the attempt and notify
-    log_and_notify
-    
-    exit 1
-fi
-
-# Debug info that can be enabled if needed
-# echo "Verified repository: $url is a valid zeptonow repository"
-
-exit 0
+# --- Failsafe Execution ---
+main "$@" || exit 0
