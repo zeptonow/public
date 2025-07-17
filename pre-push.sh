@@ -162,12 +162,26 @@ EOF
         
         while read -r local_ref local_sha remote_ref remote_sha; do
             if [[ "$local_sha" =~ ^0+$ ]]; then continue; fi
+            
+            # Clear report for each ref
+            > "$temp_report"
+            
             local log_opts
             if [[ "$remote_sha" =~ ^0+$ ]]; then
-                log_opts="$local_sha"
+                # For new branches, only scan commits not already on any remote branch
+                log_opts="$local_sha --not --remotes"
             else
+                # For existing branches, scan only the new commits
                 log_opts="$remote_sha..$local_sha"
             fi
+            
+            # Debug output (enable with DEBUG_HOOK=1)
+            if [ "${DEBUG_HOOK:-}" = "1" ]; then
+                local commit_count; commit_count=$(git log --oneline $log_opts 2>/dev/null | wc -l)
+                echo "DEBUG: Scanning ref $local_ref: $commit_count commits" >&2
+                echo "DEBUG: Range: $log_opts" >&2
+            fi
+            
             if ! gitleaks detect --source="." --log-opts="$log_opts" --report-format="json" --report-path="$temp_report" --redact=60 >/dev/null 2>&1; then
                 if [ -s "$temp_report" ]; then
                     secrets_found_in_push=true
