@@ -45,14 +45,17 @@ main() {
     is_valid_zeptonow_repo() {
         local url="$1"
         url="${url%.git}" # Remove .git suffix
-
+    
+        # NEW: Strip embedded user info and token (e.g., https://user:token@... )
+        url=$(echo "$url" | sed -E 's|//.*@|//|')
+    
         # Normalize if it's NOT an HTTP/S URL but contains a colon (is an SSH alias)
         if [[ "$url" != "https://"* ]] && [[ "$url" != "http://"* ]] && [[ "$url" == *:* ]]; then
             local path="${url#*:}"
             url="https://github.com/$path"
         fi
-
-        # Final validation check on the normalized URL
+    
+        # Final validation check on the cleaned URL
         [[ "$url" == "https://github.com/zeptonow/"* ]] || \
         [[ "$url" == "https://gitlab.com/zeptonow/"* ]]
     }
