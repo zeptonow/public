@@ -44,14 +44,17 @@ main() {
     # --- Helper Functions ---
     is_valid_zeptonow_repo() {
         local url="$1"
-        url="${url%.git}"
-        if [[ "$url" == git@* ]]; then
-            local domain_and_path="${url#git@}"
-            local domain="${domain_and_path%%:*}"
-            local path="${domain_and_path#*:}"
-            url="https://$domain/$path"
+        url="${url%.git}" # Remove .git suffix
+
+        # Normalize if it's NOT an HTTP/S URL but contains a colon (is an SSH alias)
+        if [[ "$url" != "https://"* ]] && [[ "$url" != "http://"* ]] && [[ "$url" == *:* ]]; then
+            local path="${url#*:}"
+            url="https://github.com/$path"
         fi
-        [[ "$url" == *"github.com/zeptonow/"* ]] || [[ "$url" == *"gitlab.com/zeptonow/"* ]]
+
+        # Final validation check on the normalized URL
+        [[ "$url" == "https://github.com/zeptonow/"* ]] || \
+        [[ "$url" == "https://gitlab.com/zeptonow/"* ]]
     }
 
     json_escape() {
