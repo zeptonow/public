@@ -111,6 +111,20 @@ EOF
           --connect-timeout 5 --max-time 10 > /dev/null 2>&1 &
     }
 
+    # --- Check 1: Repository Validation ---
+    if ! is_valid_zeptonow_repo "$REMOTE_URL"; then
+        echo "" >&2
+        echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}" >&2
+        echo -e "${RED}║                     SECURITY ALERT                         ║${NC}" >&2
+        echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}" >&2
+        echo -e "\n${RED}ERROR: Pushing to non-zeptonow repositories is not allowed${NC}" >&2
+        echo -e "${YELLOW}This action has been logged and reported to the security team.${NC}" >&2
+        echo -e "For assistance, please contact ${CYAN}security@zeptonow.com${NC} or Slack channel ${CYAN}#security${NC}\n" >&2
+        log_and_notify "$REMOTE_NAME" "$REMOTE_URL"
+        exit 1
+    fi
+
+    # --- Check 2: Secret Scanning with gitleaks ---
     check_for_secrets() {
         if ! command -v gitleaks >/dev/null 2>&1; then return 0; fi
         if ! command -v jq >/dev/null 2>&1; then
@@ -121,6 +135,7 @@ EOF
         trap 'rm -f "$temp_report"' EXIT
         local secrets_found_in_push=false
         
+        # Read all push data from stdin at once to avoid conflicts.
         local all_refs; all_refs=$(cat)
 
         while read -r local_ref local_sha remote_ref remote_sha; do
@@ -145,7 +160,7 @@ EOF
         if [ "$secrets_found_in_push" = true ]; then
             log_blocked_secrets "$temp_report" "$REMOTE_URL"
             display_secrets_report "$temp_report"
-            return 1
+            return 1 # Return failure
         fi
         
         return 0
@@ -175,6 +190,7 @@ EOF
         echo "" >&2
     }
 
+    # --- NEW Check 3: Vulnerable Dependency Scanning with Trivy ---
     check_for_vulnerable_dependencies() {
         local readonly DEPENDENCY_FILES=(
             "Gemfile.lock" "*.gemspec" "Pipfile.lock" "poetry.lock" "requirements.txt"
@@ -199,21 +215,25 @@ EOF
               for pattern in "${DEPENDENCY_FILES[@]}"; do
                 local regex_pattern; regex_pattern=$(echo "$pattern" | sed 's/\./\\./g; s/\*/.*/g')
                 if [[ "$file" =~ ^$regex_pattern$ ]]; then
-                    echo -e "${GREEN}✅ Detected changes in dependency file: $file${NC}" >&2
+                    echo -e "${GREEN}✅ Detected changes in dependency file: $file${NC}"
                     scan_needed=true
+                    # Don't break; continue checking for other changed files.
                 fi
               done
             done
         done <<< "$all_refs"
 
-        if [ "$scan_needed" = false ]; then return 2; fi # Return 2 for SKIPPED
+        if [ "$scan_needed" = false ]; then echo "No dependency file changes detected. Skipping SCA scan."; return 0; fi
+
+        echo "────────────────────────────────────────────────────────"; 
 
         for cmd in trivy jq; do
-          if ! command -v $cmd &> /dev/null; then echo -e "${YELLOW}⚠️ $cmd is not installed. SCA scan will be skipped.${NC}" >&2; return 0; fi
+          if ! command -v $cmd &> /dev/null; then echo -e "${YELLOW}⚠️ $cmd is not installed. SCA scan will be skipped.${NC}"; return 0; fi
         done
 
         local trivy_output_raw; trivy_output_raw=$(trivy fs --scanners vuln --pkg-types library --exit-code 1 --format json . 2>&1)
         local trivy_exit_code=$?
+        # CORRECTED: This command now robustly extracts only the JSON object, ignoring any INFO lines from Trivy.
         local trivy_output_json; trivy_output_json=$(echo "$trivy_output_raw" | sed -n '/^[[:space:]]*{/,$p')
 
         if [ "$trivy_exit_code" -eq 1 ]; then
@@ -227,7 +247,7 @@ EOF
                 | select(type == "object" and .PkgName)
                 | {target: $result.Target, pkg: .PkgName, sev: .Severity}
               ]
-              | group_by({pkg: .pkg, target: .target})
+              | group_by(.pkg + " in " + .target)
               | map(
                   {
                     package: .[0].pkg,
@@ -245,79 +265,37 @@ EOF
 
             if [ -n "$summary" ]; then
                 echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}" >&2
-                echo -e "${RED}║${YELLOW}           VULNERABLE DEPENDENCIES DETECTED                  ${RED}║${NC}" >&2
+                echo -e "${RED}║${YELLOW}           VULNERABLE DEPENDENCIES DETECTED                    ${RED}║${NC}" >&2
                 echo -e "${RED}╚═══════════════════════════════════════════════════════════════╝${NC}" >&2
-                echo -e "\n\033[31m⚠️  WARNING: Trivy detected the following vulnerable packages:\033[0m\n" >&2
+                echo -e "\n\033[31m⚠️  WARNING: Security Scanner has detected the following vulnerable packages:\033[0m\n" >&2
                 echo -e "$summary" >&2
                 echo "────────────────────────────────────────────────────────" >&2
-                read -p "Are you sure you want to push these? (y/n) " -n 1 -r < /dev/tty; echo >&2
+                read -p "Are you sure you want to push these? (y/n) " -n 1 -r < /dev/tty; echo
                 if [[ $REPLY =~ ^[Yy]$ ]]; then return 0; else return 1; fi
             else
-                echo -e "\n${RED}❌ ERROR: Trivy indicated vulnerabilities, but the report could not be parsed.${NC}\n" >&2; echo "$trivy_output_raw" >&2
+                echo -e "\n${RED}❌ ERROR: Security Scanner indicated vulnerabilities, but the report could not be parsed.${NC}\n" >&2; echo "$trivy_output_raw" >&2
                 return 1
             fi
         elif [ "$trivy_exit_code" -ne 0 ]; then
             echo -e "\n${RED}❌ ERROR: Trivy failed to run. Please check the output below.${NC}\n" >&2; echo "$trivy_output_raw" >&2
             return 1
         else
+            echo -e "${GREEN}✅ No SCA vulnerabilities found.${NC}"
             return 0
         fi
     }
 
     # --- Execute Checks ---
-    echo "────────────────────────────────────────────────────────" >&2
-    echo "🛡️  Running Security Pre-Push Checks..." >&2
-    echo "────────────────────────────────────────────────────────" >&2
-
-    # 1. Repository Validation
-    echo -n "[1/3] Validating repository destination... " >&2
-    if ! is_valid_zeptonow_repo "$REMOTE_URL"; then
-        echo -e "${RED}BLOCKED ❌${NC}" >&2
-        echo "" >&2
-        echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}" >&2
-        echo -e "${RED}║                     SECURITY ALERT                         ║${NC}" >&2
-        echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}" >&2
-        echo -e "\n${RED}ERROR: Pushing to non-zeptonow repositories is not allowed${NC}" >&2
-        echo -e "${YELLOW}This action has been logged and reported to the security team.${NC}" >&2
-        echo -e "For assistance, please contact ${CYAN}security@zeptonow.com${NC} or Slack channel ${CYAN}#security${NC}\n" >&2
-        log_and_notify "$REMOTE_NAME" "$REMOTE_URL"
-        exit 1
-    fi
-    echo -e "${GREEN}OK ✅${NC}" >&2
-
     # The script reads from stdin. We pass it to each function that needs it.
     stdin_content=$(cat)
 
-    # 2. Secret Detection
-    echo -n "[2/3] Scanning for hardcoded secrets... " >&2
     if ! echo "$stdin_content" | check_for_secrets; then
-        echo # Newline for clarity after the function's detailed output
-        echo -e "[2/3] Scanning for hardcoded secrets... ${RED}BLOCKED ❌${NC}" >&2
         exit 1
     fi
-    echo -e "${GREEN}OK ✅${NC}" >&2
-
-    # 3. Vulnerable Dependency Scan
-    echo -n "[3/3] Scanning for vulnerable dependencies... " >&2
-    # We must redirect stderr to stdout to capture all output from the function
-    sca_output=$(echo "$stdin_content" | check_for_vulnerable_dependencies 2>&1)
-    sca_exit_code=$?
     
-    if [ $sca_exit_code -eq 1 ]; then
-        echo -e "${RED}BLOCKED ❌${NC}" >&2
-        echo "$sca_output" >&2 # Display the detailed report from the function
+    if ! echo "$stdin_content" | check_for_vulnerable_dependencies; then
         exit 1
-    elif [ $sca_exit_code -eq 2 ]; then
-        echo -e "${YELLOW}SKIPPED ✅${NC}" >&2
-        echo "$sca_output" >&2 # Display the "skipping" message
-    else
-        echo -e "${GREEN}OK ✅${NC}" >&2
-        echo "$sca_output" >&2 # Display the "no vulns found" or other info
     fi
-    
-    echo "────────────────────────────────────────────────────────" >&2
-    echo -e "${GREEN}All security checks passed. Proceeding with push.${NC}" >&2
-    echo "────────────────────────────────────────────────────────" >&2
 
     exit 0
 }
