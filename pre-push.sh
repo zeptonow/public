@@ -20,6 +20,8 @@
 main() {
     # Exit immediately if a command exits with a non-zero status.
     set -e
+    export TERM=xterm-256color
+
 
     # --- Configuration ---
     readonly REMOTE_NAME="$1"
