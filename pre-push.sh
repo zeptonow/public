@@ -12,6 +12,7 @@
 main() {
     # --- Configuration ---
     export TERM=xterm-256color
+    export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
     readonly REMOTE_NAME="$1"
     readonly REMOTE_URL="$2"
